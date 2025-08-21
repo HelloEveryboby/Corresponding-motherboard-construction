@@ -3,7 +3,8 @@
 #include "command.h"
 #include "display.h"
 #include "keypad.h"
-#include "ir_handler.h" // Include the new IR handler module
+#include "ir_handler.h"
+#include "nfc_handler.h" // Include the new NFC handler module
 
 // Placeholder for HAL_Delay
 void HAL_Delay(volatile uint32_t ms) {
@@ -24,7 +25,6 @@ void HAL_Init(void) {
 }
 
 // --- Example Command Handler for Get Status ---
-// This one can remain in main as a system-level command example.
 void handle_get_status_command(const uint8_t *data, uint16_t len);
 
 
@@ -43,6 +43,7 @@ int main(void) {
 
     // 4. Initialize application modules, which will register their own commands
     IR_Init();
+    NFC_Init(); // Initialize the NFC module
 
     // Register any other general system commands
     Command_Register(0x01, handle_get_status_command);
