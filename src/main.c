@@ -3,18 +3,28 @@
 #include "Application/Keypad/keypad.h" // Moved to Application layer
 #include "uart.h"
 #include "Application/IR/ir_tx.h" // Include the new IR header
+#include "Application/NFC/nfc_app.h" // Include the new NFC header
 #include <stdio.h> // For sprintf
 
-// --- Menu System ---
-const char* menu_items[] = {
-    "Send NEC Command",
-    "Learn New Command",
-    "Saved Remotes",
+// --- Main Application State ---
+typedef enum {
+    APP_STATE_MAIN_MENU,
+    APP_STATE_IR_APP,
+    APP_STATE_NFC_APP,
+} AppState;
+
+static AppState current_app_state = APP_STATE_MAIN_MENU;
+// --- End Main Application State ---
+
+// --- Main Menu System ---
+const char* main_menu_items[] = {
+    "Infrared Menu",
+    "NFC Menu",
     "Settings"
 };
-const int menu_size = sizeof(menu_items) / sizeof(menu_items[0]);
-int current_selection = 0;
-// --- End Menu System ---
+const int main_menu_size = sizeof(main_menu_items) / sizeof(main_menu_items[0]);
+int main_current_selection = 0;
+// --- End Main Menu System ---
 
 // Placeholder for HAL_Delay
 void HAL_Delay(volatile uint32_t ms) {
@@ -31,57 +41,60 @@ void SystemClock_Config(void) {}
 void HAL_Init(void) {}
 
 // --- UI Function ---
-void draw_menu(void) {
+void draw_main_menu(void) {
     char buffer[64];
-    UART_Transmit_String("\n--- IR Remote Menu ---\n");
-    for (int i = 0; i < menu_size; i++) {
-        if (i == current_selection) {
-            sprintf(buffer, "> %s\n", menu_items[i]);
+    UART_Transmit_String("\n--- Main Menu ---\n");
+    for (int i = 0; i < main_menu_size; i++) {
+        if (i == main_current_selection) {
+            sprintf(buffer, "> %s\n", main_menu_items[i]);
         } else {
-            sprintf(buffer, "  %s\n", menu_items[i]);
+            sprintf(buffer, "  %s\n", main_menu_items[i]);
         }
         UART_Transmit_String(buffer);
     }
-    UART_Transmit_String("----------------------\n");
+    UART_Transmit_String("-----------------\n");
 }
 // --- End UI Function ---
 
-void handle_key_press(KeyCode key) {
+void handle_main_menu_key_press(KeyCode key) {
     int needs_redraw = 1; // Redraw by default
 
     switch (key) {
         case KEY_UP:
-            current_selection--;
-            if (current_selection < 0) {
-                current_selection = menu_size - 1; // Wrap around
+            main_current_selection--;
+            if (main_current_selection < 0) {
+                main_current_selection = main_menu_size - 1;
             }
             break;
         case KEY_DOWN:
-            current_selection++;
-            if (current_selection >= menu_size) {
-                current_selection = 0; // Wrap around
+            main_current_selection++;
+            if (main_current_selection >= main_menu_size) {
+                main_current_selection = 0;
             }
             break;
         case KEY_OK:
-            // Check which item is selected and act accordingly
-            if (current_selection == 0) { // "Send NEC Command"
-                // Call the IR function with dummy values
-                IR_Send_NEC(0x00, 0x01);
-            } else {
-                // For other items, just print a message for now
-                char buffer[64];
-                sprintf(buffer, "\n*** Action for '%s' not implemented yet. ***\n", menu_items[current_selection]);
-                UART_Transmit_String(buffer);
+            switch (main_current_selection) {
+                case 0: // Infrared Menu
+                    // This is where we would switch to an IR App state
+                    // For now, we just call the function directly
+                    IR_Send_NEC(0x00, 0x01);
+                    break;
+                case 1: // NFC Menu
+                    current_app_state = APP_STATE_NFC_APP;
+                    NFC_App_Init();
+                    break;
+                default:
+                    {
+                        char buffer[64];
+                        sprintf(buffer, "\n*** Action for '%s' not implemented. ***\n", main_menu_items[main_current_selection]);
+                        UART_Transmit_String(buffer);
+                    }
+                    break;
             }
-            // We don't want to redraw the menu after this, the IR function provides its own output
             needs_redraw = 0;
             break;
         case KEY_BACK:
-            UART_Transmit_String("\n*** Back pressed ***\n");
-            break;
-        case KEY_LEFT:
-        case KEY_RIGHT:
-            // Do nothing for left/right in this menu
+            // No action on back in main menu
             needs_redraw = 0;
             break;
         default:
@@ -90,29 +103,45 @@ void handle_key_press(KeyCode key) {
     }
 
     if (needs_redraw) {
-        draw_menu();
+        draw_main_menu();
     }
 }
 
 int main(void) {
-    // 1. Initialize HAL and System Clock
     HAL_Init();
     SystemClock_Config();
 
-    // 2. Initialize all configured peripherals
     Display_Init();
     Keypad_Init();
     UART_Init();
 
     UART_Transmit_String("System Initialized.\n");
-    draw_menu(); // Initial menu draw
+    draw_main_menu(); // Initial menu draw
 
-    // 3. Enter the main application loop
     while (1) {
+        // --- State Machine ---
+        if (current_app_state == APP_STATE_NFC_APP) {
+            if (NFC_App_Get_State() == NFC_APP_STATE_IDLE) {
+                current_app_state = APP_STATE_MAIN_MENU;
+                draw_main_menu();
+            }
+        }
+        // --- End State Machine ---
+
         KeyCode key = Keypad_Scan();
 
         if (key != KEY_NONE) {
-            handle_key_press(key);
+            switch (current_app_state) {
+                case APP_STATE_MAIN_MENU:
+                    handle_main_menu_key_press(key);
+                    break;
+                case APP_STATE_NFC_APP:
+                    NFC_App_Handle_Key(key);
+                    break;
+                case APP_STATE_IR_APP:
+                    // Placeholder for IR app key handler
+                    break;
+            }
         }
 
         HAL_Delay(10);
