@@ -4,7 +4,8 @@
 #include "display.h"
 #include "keypad.h"
 #include "ir_handler.h"
-#include "nfc_handler.h" // Include the new NFC handler module
+#include "nfc_handler.h"
+#include "ibutton_handler.h" // Include the new iButton handler module
 
 // Placeholder for HAL_Delay
 void HAL_Delay(volatile uint32_t ms) {
@@ -43,7 +44,8 @@ int main(void) {
 
     // 4. Initialize application modules, which will register their own commands
     IR_Init();
-    NFC_Init(); // Initialize the NFC module
+    NFC_Init();
+    iButton_Init(); // Initialize the iButton module
 
     // Register any other general system commands
     Command_Register(0x01, handle_get_status_command);
