@@ -1,79 +1,836 @@
+#include "stm32f4xx_hal.h"
 #include "display.h"
+#include "keypad.h"
+#include "icons.h"
+#include "storage.h"
+#include "rtc.h"
+#include "power.h"
+#include "connectivity.h"
+#include "sensors.h"
 
-// Note: This is a placeholder driver.
-// The functions below are stubs and do not perform any real operations.
-// They need to be implemented based on the specific e-ink display controller
-// (e.g., SSD1608, IL3820, etc.).
+// 系统状态结构
+typedef struct {
+    uint8_t selected_app;       // 当前选中的应用索引
+    uint8_t battery_level;      // 电池电量百分比
+    uint8_t battery_state;      // 电池状态 (0=放电,1=充电,2=充满)
+    uint8_t ble_connected;      // 蓝牙连接状态
+    uint8_t usb_connected;      // USB连接状态
+    uint8_t sd_present;         // SD卡存在状态
+    uint8_t signal_strength;    // 无线信号强度 (0-4)
+    uint8_t unread_notifications; // 未读通知数量
+    RTC_TimeTypeDef time;       // 当前时间
+    RTC_DateTypeDef date;       // 当前日期
+    float temperature;          // 设备温度
+    uint8_t dark_mode;          // 深色模式状态
+} SystemStatus;
 
-// We would need a buffer to hold the pixel data for the display.
-// For a 250x122 display, 1-bit color depth: (250 * 122) / 8 = 3812.5 -> 3813 bytes
-// static uint8_t display_buffer[EPD_WIDTH * EPD_HEIGHT / 8];
+SystemStatus system_status = {
+    .selected_app = 0,
+    .battery_level = 100,
+    .battery_state = 2,
+    .ble_connected = 0,
+    .usb_connected = 0,
+    .sd_present = 1,
+    .signal_strength = 3,
+    .unread_notifications = 0,
+    .temperature = 25.5f,
+    .dark_mode = 0
+};
 
-/**
- * @brief Initializes the e-Paper display
- *
- * TODO: Implement the actual initialization sequence.
- * This should involve:
- * 1. Initializing GPIO pins for CS, DC, RST, BUSY.
- * 2. Initializing the SPI peripheral.
- * 3. Performing the hardware reset sequence (toggling RST pin).
- * 4. Sending the command sequence to configure the display controller.
- */
-void Display_Init(void) {
-    // This is a placeholder.
-    // Real implementation will configure GPIOs and SPI, then send init commands.
+// 应用定义结构
+typedef struct {
+    uint32_t icon;              // 应用图标
+    const char* name;           // 应用名称
+    const char* description;    // 应用描述
+    void (*enter)();            // 进入应用函数
+    void (*quick_action)();     // 快速动作函数
+    uint8_t has_notification;   // 是否有通知
+} App;
+
+// 应用列表
+App apps[] = {
+    {
+        ICON_RFID, 
+        "RFID", 
+        "管理RFID卡片和设备",
+        RFID_App_Enter,
+        RFID_Quick_Scan,
+        0
+    },
+    {
+        ICON_NFC, 
+        "NFC", 
+        "读写NFC标签和卡片",
+        NFC_App_Enter,
+        NFC_Quick_Read,
+        1
+    },
+    {
+        ICON_IR, 
+        "红外", 
+        "发送和接收红外信号",
+        IR_App_Enter,
+        IR_Quick_Send,
+        0
+    },
+    {
+        ICON_SUBGHZ, 
+        "SubGHz", 
+        "Sub-1GHz无线通信",
+        SubGHz_App_Enter,
+        SubGHz_Quick_Scan,
+        0
+    },
+    {
+        ICON_BLUETOOTH, 
+        "蓝牙", 
+        "BLE设备管理和通信",
+        Bluetooth_App_Enter,
+        Bluetooth_Quick_Connect,
+        0
+    },
+    {
+        ICON_DEVICE, 
+        "设备", 
+        "已保存设备管理",
+        DeviceManager_App_Enter,
+        DeviceManager_Quick_Access,
+        3
+    },
+    {
+        ICON_SETTINGS, 
+        "设置", 
+        "系统配置和选项",
+        Settings_App_Enter,
+        Settings_Quick_Toggle,
+        0
+    },
+    {
+        ICON_TOOLS, 
+        "工具", 
+        "实用工具和诊断",
+        Tools_App_Enter,
+        Tools_Quick_Screenshot,
+        0
+    },
+    {
+        ICON_GAMES, 
+        "游戏", 
+        "内置娱乐应用",
+        Games_App_Enter,
+        Games_Quick_Start,
+        0
+    }
+};
+
+#define APP_COUNT (sizeof(apps) / sizeof(apps[0]))
+
+// 主屏幕绘制
+void Main_Screen_Draw(uint8_t full_redraw) {
+    static uint8_t first_draw = 1;
+    
+    if (full_redraw || first_draw) {
+        Display_Clear();
+        first_draw = 0;
+        
+        // 绘制背景
+        if (system_status.dark_mode) {
+            Display_FillRect(0, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT, COLOR_BLACK);
+        } else {
+            Display_FillRect(0, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT, COLOR_WHITE);
+        }
+        
+        // 绘制顶部装饰条
+        Draw_Top_Decoration();
+    }
+    
+    // 绘制状态栏
+    Draw_Status_Bar(full_redraw);
+    
+    // 绘制应用网格
+    Draw_App_Grid(full_redraw);
+    
+    // 绘制底部信息面板
+    Draw_Bottom_Panel(full_redraw);
+    
+    // 绘制选中的应用详情
+    Draw_Selected_App_Details(full_redraw);
+    
+    // 绘制通知指示器
+    Draw_Notification_Indicator(full_redraw);
+    
+    // 更新显示
+    Display_Update();
 }
 
-/**
- * @brief Clears the entire display buffer.
- *
- * TODO: Implement buffer clearing.
- */
-void Display_Clear(uint8_t color) {
-    // This is a placeholder.
-    // Real implementation will fill the internal display_buffer with the specified color.
-    // For example, 0xFF for white or 0x00 for black.
+// 绘制顶部装饰
+void Draw_Top_Decoration(void) {
+    // 渐变背景
+    for (int y = 0; y < 10; y++) {
+        uint16_t color = Display_Blend_Colors(
+            system_status.dark_mode ? COLOR_DARK_GRAY : COLOR_LIGHT_GRAY, 
+            system_status.dark_mode ? COLOR_BLACK : COLOR_WHITE, 
+            y * 10
+        );
+        Display_DrawLine(0, y, DISPLAY_WIDTH, y, color);
+    }
+    
+    // 设备名称
+    Display_Print_Centered(5, "多功能设备管理器", system_status.dark_mode ? FONT_SMALL_WHITE : FONT_SMALL);
+    
+    // 分隔线
+    Display_DrawLine(0, 15, DISPLAY_WIDTH, 15, system_status.dark_mode ? COLOR_DARK_GRAY : COLOR_LIGHT_GRAY);
 }
 
-/**
- * @brief Draws a single pixel in the buffer.
- *
- * TODO: Implement pixel drawing logic.
- */
-void Display_DrawPixel(uint16_t x, uint16_t y, uint8_t color) {
-    // This is a placeholder.
-    // Real implementation will calculate the correct byte and bit in the
-    // display_buffer and set/clear it based on the color.
+// 绘制状态栏
+void Draw_Status_Bar(uint8_t full_redraw) {
+    static uint8_t last_battery_level = 0;
+    static uint8_t last_battery_state = 0;
+    static uint8_t last_ble_connected = 0;
+    static uint8_t last_usb_connected = 0;
+    static uint8_t last_sd_present = 0;
+    static uint8_t last_signal_strength = 0;
+    
+    // 计算需要更新的区域
+    uint8_t need_update = full_redraw;
+    
+    if (last_battery_level != system_status.battery_level ||
+        last_battery_state != system_status.battery_state) {
+        need_update = 1;
+        last_battery_level = system_status.battery_level;
+        last_battery_state = system_status.battery_state;
+    }
+    
+    if (last_ble_connected != system_status.ble_connected ||
+        last_usb_connected != system_status.usb_connected) {
+        need_update = 1;
+        last_ble_connected = system_status.ble_connected;
+        last_usb_connected = system_status.usb_connected;
+    }
+    
+    if (last_sd_present != system_status.sd_present) {
+        need_update = 1;
+        last_sd_present = system_status.sd_present;
+    }
+    
+    if (last_signal_strength != system_status.signal_strength) {
+        need_update = 1;
+        last_signal_strength = system_status.signal_strength;
+    }
+    
+    if (!need_update) return;
+    
+    // 清除状态栏区域
+    Display_FillRect(0, 16, DISPLAY_WIDTH, 24, system_status.dark_mode ? COLOR_BLACK : COLOR_WHITE);
+    
+    // 电池状态 (左侧)
+    Draw_Battery_Status(5, 18);
+    
+    // 时间日期 (中部)
+    char time_str[16];
+    snprintf(time_str, sizeof(time_str), "%02d:%02d", 
+             system_status.time.Hours, system_status.time.Minutes);
+    Display_Print_Centered(20, time_str, system_status.dark_mode ? FONT_MEDIUM_WHITE : FONT_MEDIUM);
+    
+    char date_str[16];
+    snprintf(date_str, sizeof(date_str), "%02d/%02d", 
+             system_status.date.Date, system_status.date.Month);
+    Display_Print_Centered(35, date_str, system_status.dark_mode ? FONT_SMALL_WHITE : FONT_SMALL);
+    
+    // 连接状态 (右侧)
+    Draw_Connection_Status(DISPLAY_WIDTH - 70, 18);
+    
+    // 分隔线
+    Display_DrawLine(0, 40, DISPLAY_WIDTH, 40, system_status.dark_mode ? COLOR_DARK_GRAY : COLOR_LIGHT_GRAY);
 }
 
-/**
- * @brief Draws a text string at a specified location.
- *
- * TODO: Implement text drawing. This requires a font library.
- */
-void Display_DrawText(uint16_t x, uint16_t y, const char* text, void* font, uint8_t color) {
-    // This is a placeholder.
-    // Real implementation will iterate through the string and draw each character
-    // using a font map.
+// 绘制电池状态
+void Draw_Battery_Status(uint16_t x, uint16_t y) {
+    // 电池图标
+    uint32_t bat_icon;
+    if (system_status.battery_state == 1) { // 充电中
+        bat_icon = system_status.battery_level > 90 ? ICON_BATTERY_CHARGING_FULL : 
+                  system_status.battery_level > 70 ? ICON_BATTERY_CHARGING_3 :
+                  system_status.battery_level > 40 ? ICON_BATTERY_CHARGING_2 :
+                  system_status.battery_level > 10 ? ICON_BATTERY_CHARGING_1 : 
+                  ICON_BATTERY_CHARGING_EMPTY;
+    } else {
+        bat_icon = system_status.battery_level > 90 ? ICON_BATTERY_FULL : 
+                  system_status.battery_level > 70 ? ICON_BATTERY_3 :
+                  system_status.battery_level > 40 ? ICON_BATTERY_2 :
+                  system_status.battery_level > 10 ? ICON_BATTERY_1 : 
+                  ICON_BATTERY_EMPTY;
+    }
+    Display_DrawIcon(x, y, bat_icon);
+    
+    // 电量百分比
+    char bat_str[8];
+    snprintf(bat_str, sizeof(bat_str), "%d%%", system_status.battery_level);
+    Display_Print(x + 25, y + 4, bat_str, system_status.dark_mode ? FONT_SMALL_WHITE : FONT_SMALL);
+    
+    // 温度指示
+    char temp_str[8];
+    snprintf(temp_str, sizeof(temp_str), "%.1fC", system_status.temperature);
+    Display_Print(x, y + 20, temp_str, system_status.dark_mode ? FONT_SMALL_WHITE : FONT_SMALL);
 }
 
-/**
- * @brief Sends the internal buffer to the display to show content.
- *
- * TODO: Implement the data transfer sequence.
- */
-void Display_Update(void) {
-    // This is a placeholder.
-    // Real implementation will send the contents of display_buffer to the
-    // e-ink display via SPI and then issue the display refresh command.
+// 绘制连接状态
+void Draw_Connection_Status(uint16_t x, uint16_t y) {
+    // USB状态
+    if (system_status.usb_connected) {
+        Display_DrawIcon(x, y, ICON_USB_CONNECTED);
+    } else {
+        Display_DrawIcon(x, y, ICON_USB_DISCONNECTED);
+    }
+    
+    // 蓝牙状态
+    if (system_status.ble_connected) {
+        Display_DrawIcon(x + 20, y, ICON_BLE_CONNECTED);
+    } else {
+        Display_DrawIcon(x + 20, y, ICON_BLE_DISCONNECTED);
+    }
+    
+    // SD卡状态
+    if (system_status.sd_present) {
+        Display_DrawIcon(x + 40, y, ICON_SD_CARD);
+    } else {
+        Display_DrawIcon(x + 40, y, ICON_SD_MISSING);
+    }
+    
+    // 信号强度
+    for (int i = 0; i < 4; i++) {
+        uint16_t bar_color = (i < system_status.signal_strength) ? 
+            (system_status.dark_mode ? COLOR_WHITE : COLOR_BLACK) : 
+            (system_status.dark_mode ? COLOR_DARK_GRAY : COLOR_LIGHT_GRAY);
+        
+        uint16_t bar_height = 4 + i * 3;
+        Display_FillRect(x + 60 + i*4, y + 16 - bar_height, 2, bar_height, bar_color);
+    }
 }
 
-/**
- * @brief Puts the display into deep sleep mode to save power.
- *
- * TODO: Implement the deep sleep command sequence.
- */
-void Display_Sleep(void) {
-    // This is a placeholder.
-    // Real implementation will send the deep sleep command to the display.
+// 绘制应用网格
+void Draw_App_Grid(uint8_t full_redraw) {
+    const uint16_t grid_start_y = 42;
+    const uint16_t icon_size = 24;
+    const uint16_t icon_spacing = 8;
+    const uint8_t icons_per_row = 3;
+    
+    static uint8_t last_selected_app = 255;
+    static uint8_t last_dark_mode = 255;
+    
+    uint8_t need_redraw = full_redraw || 
+                          (last_selected_app != system_status.selected_app) ||
+                          (last_dark_mode != system_status.dark_mode);
+    
+    if (!need_redraw) return;
+    
+    last_selected_app = system_status.selected_app;
+    last_dark_mode = system_status.dark_mode;
+    
+    // 清除网格区域
+    Display_FillRect(0, grid_start_y, DISPLAY_WIDTH, DISPLAY_HEIGHT - grid_start_y - 40, 
+                   system_status.dark_mode ? COLOR_BLACK : COLOR_WHITE);
+    
+    // 绘制应用图标
+    for (int i = 0; i < APP_COUNT; i++) {
+        int row = i / icons_per_row;
+        int col = i % icons_per_row;
+        
+        uint16_t x = 10 + col * (icon_size + icon_spacing);
+        uint16_t y = grid_start_y + 10 + row * (icon_size + icon_spacing);
+        
+        // 选中状态的高亮效果
+        if (i == system_status.selected_app) {
+            // 背景光晕
+            for (int r = 0; r <= 5; r++) {
+                uint16_t alpha = (5 - r) * 25;
+                uint16_t glow_color = Display_Alpha_Blend(
+                    system_status.dark_mode ? COLOR_BLUE : COLOR_LIGHT_BLUE, 
+                    system_status.dark_mode ? COLOR_BLACK : COLOR_WHITE, 
+                    alpha
+                );
+                Display_DrawCircle(x + icon_size/2, y + icon_size/2, icon_size/2 + r, glow_color);
+            }
+            
+            // 高亮边框
+            Display_DrawCircle(x + icon_size/2, y + icon_size/2, icon_size/2 + 2, 
+                              system_status.dark_mode ? COLOR_WHITE : COLOR_BLACK);
+        }
+        
+        // 绘制应用图标
+        Display_DrawIcon(x, y, apps[i].icon);
+        
+        // 通知标记
+        if (apps[i].has_notification) {
+            Display_FillCircle(x + icon_size - 5, y + 5, 4, COLOR_RED);
+            Display_DrawCircle(x + icon_size - 5, y + 5, 4, system_status.dark_mode ? COLOR_WHITE : COLOR_BLACK);
+        }
+    }
+}
+
+// 绘制底部信息面板
+void Draw_Bottom_Panel(uint8_t full_redraw) {
+    const uint16_t panel_y = DISPLAY_HEIGHT - 40;
+    
+    static uint8_t last_selected_app = 255;
+    static uint8_t last_dark_mode = 255;
+    
+    uint8_t need_redraw = full_redraw || 
+                          (last_selected_app != system_status.selected_app) ||
+                          (last_dark_mode != system_status.dark_mode);
+    
+    if (!need_redraw) return;
+    
+    last_selected_app = system_status.selected_app;
+    last_dark_mode = system_status.dark_mode;
+    
+    // 清除面板区域
+    Display_FillRect(0, panel_y, DISPLAY_WIDTH, 40, system_status.dark_mode ? COLOR_BLACK : COLOR_WHITE);
+    
+    // 顶部边框
+    Display_DrawLine(0, panel_y, DISPLAY_WIDTH, panel_y, system_status.dark_mode ? COLOR_DARK_GRAY : COLOR_LIGHT_GRAY);
+    
+    // 选中的应用信息
+    App* selected = &apps[system_status.selected_app];
+    
+    // 应用名称
+    Display_Print_Centered(panel_y + 5, selected->name, system_status.dark_mode ? FONT_MEDIUM_WHITE : FONT_MEDIUM);
+    
+    // 应用描述
+    Display_Print_Centered(panel_y + 25, selected->description, system_status.dark_mode ? FONT_SMALL_WHITE : FONT_SMALL);
+    
+    // 操作提示
+    uint16_t text_color = system_status.dark_mode ? COLOR_WHITE : COLOR_BLACK;
+    Display_Print(5, panel_y + 5, "←→:导航", text_color);
+    Display_Print(5, panel_y + 25, "OK:进入", text_color);
+    Display_Print(DISPLAY_WIDTH - 70, panel_y + 5, "↑↓:滚动", text_color);
+    Display_Print(DISPLAY_WIDTH - 70, panel_y + 25, "BACK:菜单", text_color);
+}
+
+// 绘制选中的应用详情
+void Draw_Selected_App_Details(uint8_t full_redraw) {
+    static uint8_t last_selected_app = 255;
+    uint8_t need_redraw = full_redraw || (last_selected_app != system_status.selected_app);
+    
+    if (!need_redraw) return;
+    last_selected_app = system_status.selected_app;
+    
+    // 清除详情区域
+    Display_FillRect(DISPLAY_WIDTH - 100, 45, 95, DISPLAY_HEIGHT - 90, 
+                   system_status.dark_mode ? COLOR_DARK_GRAY : COLOR_LIGHT_GRAY);
+    
+    // 绘制详情面板边框
+    Display_DrawRect(DISPLAY_WIDTH - 101, 44, 97, DISPLAY_HEIGHT - 88, 
+                   system_status.dark_mode ? COLOR_WHITE : COLOR_BLACK);
+    
+    // 面板标题
+    Display_Print_Centered(DISPLAY_WIDTH - 50, 48, "应用详情", system_status.dark_mode ? FONT_SMALL_WHITE : FONT_SMALL);
+    
+    // 分隔线
+    Display_DrawLine(DISPLAY_WIDTH - 101, 60, DISPLAY_WIDTH - 5, 60, 
+                   system_status.dark_mode ? COLOR_WHITE : COLOR_BLACK);
+    
+    // 应用信息
+    App* selected = &apps[system_status.selected_app];
+    Display_Print(DISPLAY_WIDTH - 95, 65, "名称:", system_status.dark_mode ? FONT_SMALL_WHITE : FONT_SMALL);
+    Display_Print(DISPLAY_WIDTH - 50, 65, selected->name, system_status.dark_mode ? FONT_SMALL_WHITE : FONT_SMALL);
+    
+    Display_Print(DISPLAY_WIDTH - 95, 80, "通知:", system_status.dark_mode ? FONT_SMALL_WHITE : FONT_SMALL);
+    char notif_str[8];
+    snprintf(notif_str, sizeof(notif_str), "%d", selected->has_notification);
+    Display_Print(DISPLAY_WIDTH - 50, 80, notif_str, system_status.dark_mode ? FONT_SMALL_WHITE : FONT_SMALL);
+    
+    // 快速操作提示
+    Display_Print_Centered(DISPLAY_WIDTH - 50, 100, "快速操作:", system_status.dark_mode ? FONT_SMALL_WHITE : FONT_SMALL);
+    Display_Print_Centered(DISPLAY_WIDTH - 50, 115, "长按OK键", system_status.dark_mode ? FONT_SMALL_WHITE : FONT_SMALL);
+}
+
+// 绘制通知指示器
+void Draw_Notification_Indicator(uint8_t full_redraw) {
+    static uint8_t last_unread = 255;
+    
+    if (!full_redraw && last_unread == system_status.unread_notifications) return;
+    last_unread = system_status.unread_notifications;
+    
+    if (system_status.unread_notifications > 0) {
+        // 绘制通知气泡
+        Display_FillCircle(DISPLAY_WIDTH - 10, 10, 8, COLOR_RED);
+        
+        // 通知数量
+        char notif_str[4];
+        snprintf(notif_str, sizeof(notif_str), "%d", system_status.unread_notifications);
+        Display_Print(DISPLAY_WIDTH - 12, 6, notif_str, FONT_SMALL_WHITE);
+    } else {
+        // 清除通知区域
+        Display_FillRect(DISPLAY_WIDTH - 18, 2, 16, 16, 
+                       system_status.dark_mode ? COLOR_BLACK : COLOR_WHITE);
+    }
+}
+
+// 主屏幕输入处理
+void Main_Screen_Handle_Input(KeyCode key, uint32_t press_duration) {
+    static uint32_t last_key_time = 0;
+    static uint8_t long_press_active = 0;
+    
+    if (key == KEY_NONE) {
+        long_press_active = 0;
+        return;
+    }
+    
+    // 处理长按
+    if (press_duration > 800 && !long_press_active) {
+        long_press_active = 1;
+        
+        switch (key) {
+            case KEY_OK:
+                // 执行快速操作
+                if (apps[system_status.selected_app].quick_action) {
+                    apps[system_status.selected_app].quick_action();
+                }
+                break;
+                
+            case KEY_BACK:
+                // 打开全局菜单
+                Open_Global_Menu();
+                break;
+                
+            case KEY_UP:
+                // 滚动到顶部
+                system_status.selected_app = 0;
+                Main_Screen_Draw(0);
+                break;
+                
+            case KEY_DOWN:
+                // 滚动到底部
+                system_status.selected_app = APP_COUNT - 1;
+                Main_Screen_Draw(0);
+                break;
+        }
+        
+        return;
+    }
+    
+    // 短按处理
+    if (press_duration < 300) {
+        switch (key) {
+            case KEY_LEFT:
+                system_status.selected_app = (system_status.selected_app - 1 + APP_COUNT) % APP_COUNT;
+                Main_Screen_Draw(0);
+                break;
+                
+            case KEY_RIGHT:
+                system_status.selected_app = (system_status.selected_app + 1) % APP_COUNT;
+                Main_Screen_Draw(0);
+                break;
+                
+            case KEY_UP:
+                // 向上滚动一行
+                if (system_status.selected_app >= 3) {
+                    system_status.selected_app -= 3;
+                    Main_Screen_Draw(0);
+                }
+                break;
+                
+            case KEY_DOWN:
+                // 向下滚动一行
+                if (system_status.selected_app + 3 < APP_COUNT) {
+                    system_status.selected_app += 3;
+                    Main_Screen_Draw(0);
+                }
+                break;
+                
+            case KEY_OK:
+                // 进入选中的应用
+                if (apps[system_status.selected_app].enter) {
+                    apps[system_status.selected_app].enter();
+                    // 返回后刷新界面
+                    Main_Screen_Draw(1);
+                }
+                break;
+                
+            case KEY_BACK:
+                // 打开通知中心
+                Open_Notification_Center();
+                break;
+        }
+    }
+}
+
+// 更新系统状态
+void Update_System_Status(void) {
+    // 更新电池状态
+    system_status.battery_level = Power_Get_Battery_Level();
+    system_status.battery_state = Power_Get_Battery_State();
+    
+    // 更新连接状态
+    system_status.ble_connected = BLE_Is_Connected();
+    system_status.usb_connected = USB_Is_Connected();
+    system_status.sd_present = Storage_SD_Detected();
+    system_status.signal_strength = Connectivity_Get_Signal_Strength();
+    
+    // 更新时间
+    HAL_RTC_GetTime(&hrtc, &system_status.time, RTC_FORMAT_BIN);
+    HAL_RTC_GetDate(&hrtc, &system_status.date, RTC_FORMAT_BIN);
+    
+    // 更新温度
+    system_status.temperature = Sensors_Get_Temperature();
+    
+    // 更新通知计数
+    system_status.unread_notifications = Notification_Get_Unread_Count();
+    
+    // 更新应用通知状态
+    for (int i = 0; i < APP_COUNT; i++) {
+        apps[i].has_notification = Notification_App_Has_Unread(i);
+    }
+}
+
+// 主屏幕循环
+void Main_Screen_Loop(void) {
+    // 初始绘制
+    Main_Screen_Draw(1);
+    
+    uint32_t last_status_update = HAL_GetTick();
+    uint32_t last_activity = HAL_GetTick();
+    uint32_t key_press_start = 0;
+    KeyCode current_key = KEY_NONE;
+    
+    while (1) {
+        // 检查按键
+        KeyCode key = Keypad_Scan();
+        uint32_t now = HAL_GetTick();
+        
+        if (key != KEY_NONE) {
+            last_activity = now;
+            
+            if (key != current_key) {
+                // 新按键按下
+                current_key = key;
+                key_press_start = now;
+            } else {
+                // 持续按下
+                uint32_t press_duration = now - key_press_start;
+                Main_Screen_Handle_Input(key, press_duration);
+            }
+        } else {
+            current_key = KEY_NONE;
+        }
+        
+        // 定期更新状态 (每秒)
+        if (now - last_status_update > 1000) {
+            Update_System_Status();
+            last_status_update = now;
+            
+            // 部分刷新界面
+            Draw_Status_Bar(0);
+            Draw_Notification_Indicator(0);
+            Display_Update();
+        }
+        
+        // 低功耗检查 (5分钟无操作)
+        if (now - last_activity > 300000) {
+            Enter_Sleep_Mode();
+            last_activity = now;
+            
+            // 唤醒后刷新界面
+            Main_Screen_Draw(1);
+        }
+        
+        // 背景动画效果
+        Draw_Background_Animation();
+        
+        HAL_Delay(10);
+    }
+}
+
+// 背景动画效果
+void Draw_Background_Animation(void) {
+    static uint32_t last_anim_time = 0;
+    uint32_t now = HAL_GetTick();
+    
+    if (now - last_anim_time > 50) {
+        last_anim_time = now;
+        
+        // 仅在空闲时显示动画
+        if (HAL_GetTick() - last_activity > 10000) {
+            // 随机粒子效果
+            static struct {
+                int16_t x, y;
+                int16_t dx, dy;
+                uint16_t color;
+                uint8_t life;
+            } particles[20];
+            
+            static uint8_t initialized = 0;
+            
+            if (!initialized) {
+                for (int i = 0; i < 20; i++) {
+                    particles[i].x = rand() % DISPLAY_WIDTH;
+                    particles[i].y = rand() % (DISPLAY_HEIGHT - 100) + 50;
+                    particles[i].dx = (rand() % 5) - 2;
+                    particles[i].dy = (rand() % 5) - 2;
+                    particles[i].color = system_status.dark_mode ? 
+                        Display_Random_Gray(50, 150) : 
+                        Display_Random_Gray(100, 200);
+                    particles[i].life = rand() % 50 + 50;
+                }
+                initialized = 1;
+            }
+            
+            // 清除上一帧粒子
+            Display_FillRect(0, 50, DISPLAY_WIDTH, DISPLAY_HEIGHT - 90, 
+                           system_status.dark_mode ? COLOR_BLACK : COLOR_WHITE);
+            
+            // 更新并绘制粒子
+            for (int i = 0; i < 20; i++) {
+                // 更新位置
+                particles[i].x += particles[i].dx;
+                particles[i].y += particles[i].dy;
+                
+                // 边界检查
+                if (particles[i].x < 0 || particles[i].x >= DISPLAY_WIDTH) {
+                    particles[i].dx = -particles[i].dx;
+                    particles[i].x = constrain(particles[i].x, 0, DISPLAY_WIDTH-1);
+                }
+                
+                if (particles[i].y < 50 || particles[i].y >= DISPLAY_HEIGHT - 40) {
+                    particles[i].dy = -particles[i].dy;
+                    particles[i].y = constrain(particles[i].y, 50, DISPLAY_HEIGHT-41);
+                }
+                
+                // 寿命减少
+                particles[i].life--;
+                if (particles[i].life == 0) {
+                    particles[i].x = rand() % DISPLAY_WIDTH;
+                    particles[i].y = rand() % (DISPLAY_HEIGHT - 100) + 50;
+                    particles[i].dx = (rand() % 5) - 2;
+                    particles[i].dy = (rand() % 5) - 2;
+                    particles[i].life = rand() % 50 + 50;
+                }
+                
+                // 绘制粒子
+                uint8_t alpha = particles[i].life > 40 ? 255 : particles[i].life * 6;
+                uint16_t color = Display_Alpha_Blend(
+                    particles[i].color, 
+                    system_status.dark_mode ? COLOR_BLACK : COLOR_WHITE, 
+                    alpha
+                );
+                
+                Display_DrawPixel(particles[i].x, particles[i].y, color);
+                Display_DrawPixel(particles[i].x+1, particles[i].y, color);
+                Display_DrawPixel(particles[i].x, particles[i].y+1, color);
+            }
+            
+            Display_Update();
+        }
+    }
+}
+
+// 进入睡眠模式
+void Enter_Sleep_Mode(void) {
+    // 保存状态
+    System_State_Save();
+    
+    // 显示睡眠界面
+    Display_Clear();
+    Display_DrawIcon(DISPLAY_WIDTH/2-24, DISPLAY_HEIGHT/2-24, ICON_SLEEP);
+    
+    char time_str[16];
+    snprintf(time_str, sizeof(time_str), "睡眠模式 %02d:%02d", 
+             system_status.time.Hours, system_status.time.Minutes);
+    Display_Print_Centered(DISPLAY_HEIGHT/2+30, time_str, FONT_MEDIUM);
+    
+    Display_Print_Centered(DISPLAY_HEIGHT/2+50, "按任意键唤醒", FONT_SMALL);
+    Display_Update();
+    
+    // 配置低功耗模式
+    Power_Enter_Sleep_Mode();
+    
+    // 唤醒后恢复
+    SystemClock_Config();
+    Peripherals_Reinit();
+    System_State_Restore();
+    
+    // 重新绘制主屏幕
+    Main_Screen_Draw(1);
+}
+
+// 全局菜单
+void Open_Global_Menu(void) {
+    const char* options[] = {
+        "电源选项",
+        "系统信息",
+        "屏幕截图",
+        "切换主题",
+        "通知中心",
+        "返回"
+    };
+    
+    uint8_t selection = 0;
+    
+    while (1) {
+        Display_Clear();
+        Display_Print_Centered(10, "全局菜单", FONT_LARGE);
+        
+        for (int i = 0; i < 6; i++) {
+            int y = 50 + i * 25;
+            
+            // 绘制菜单项
+            if (i == selection) {
+                Display_FillRoundRect(20, y-5, DISPLAY_WIDTH-40, 25, 5, 
+                                    system_status.dark_mode ? COLOR_BLUE : COLOR_LIGHT_BLUE);
+                Display_Print_Centered(y, options[i], FONT_MEDIUM_WHITE);
+            } else {
+                Display_Print_Centered(y, options[i], 
+                                     system_status.dark_mode ? FONT_MEDIUM_WHITE : FONT_MEDIUM);
+            }
+        }
+        
+        KeyCode key = Keypad_Scan();
+        if (key == KEY_UP) {
+            selection = (selection - 1 + 6) % 6;
+        } else if (key == KEY_DOWN) {
+            selection = (selection + 1) % 6;
+        } else if (key == KEY_OK) {
+            switch (selection) {
+                case 0: // 电源选项
+                    Power_Options_Menu();
+                    break;
+                case 1: // 系统信息
+                    System_Info_Screen();
+                    break;
+                case 2: // 屏幕截图
+                    Capture_Screenshot();
+                    Display_Message("截图已保存", 1500);
+                    break;
+                case 3: // 切换主题
+                    system_status.dark_mode = !system_status.dark_mode;
+                    Settings_Save_Theme(system_status.dark_mode);
+                    Main_Screen_Draw(1);
+                    break;
+                case 4: // 通知中心
+                    Open_Notification_Center();
+                    break;
+                case 5: // 返回
+                    return;
+            }
+        } else if (key == KEY_BACK) {
+            return;
+        }
+        
+        HAL_Delay(10);
+    }
+}
+
+// 初始化主屏幕
+void Main_Screen_Init(void) {
+    // 加载系统状态
+    System_State_Load();
+    
+    // 注册应用通知
+    for (int i = 0; i < APP_COUNT; i++) {
+        Notification_Register_App(i, apps[i].name);
+    }
+    
+    // 启动主屏幕
+    Main_Screen_Loop();
 }
